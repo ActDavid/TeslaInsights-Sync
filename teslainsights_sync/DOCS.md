@@ -52,7 +52,7 @@ någon annanstans anger du dess IP.
 | `stale_open_hours` | En körning/laddning som varit öppen längre än så skickas ändå, så att den inte blockerar kön. |
 | `tibber_token` | Personlig token från developer.tibber.com. |
 | `ha_entities` | Entiteter vars historik ska skickas, t.ex. `sensor.zaptec_..._total_energy`. |
-| `ha_backfill_days` | Hur långt bakåt Home Assistant-historiken hämtas första gången (begränsas av recorder). |
+| `ha_backfill_days` | Hur långt bakåt Home Assistant-historiken hämtas (högst 30). Höjs värdet hämtas den äldre historiken i efterhand, en dag per omgång. HA sparar normalt bara 10 dagars historik (`recorder: purge_keep_days`), så för 30 dagar behöver recordern behålla minst så länge. |
 
 ## Hur leveransen fungerar
 

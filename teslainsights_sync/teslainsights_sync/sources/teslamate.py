@@ -31,6 +31,17 @@ _NOISY_POSITION_COLUMNS = (
     "'is_front_defroster_on','battery_heater','battery_heater_on','battery_heater_no_power']"
 )
 _STALE = "(now() AT TIME ZONE 'UTC') - CAST(:stale AS integer) * interval '1 hour'"
+# Short address parts so the backend can show "Storgatan 1, Karlstad" instead of the full display name.
+_ADDRESS_FIELDS = ("name", "road", "house_number", "neighbourhood", "city", "town", "village", "municipality")
+
+
+def _address(alias: str) -> str:
+    pairs = ", ".join(f"'{f}', to_jsonb({alias})->>'{f}'" for f in _ADDRESS_FIELDS)
+    return f"CASE WHEN {alias}.id IS NULL THEN NULL ELSE jsonb_build_object({pairs}) END"
+
+
+# Bump when exported fields change: cursors restart and history is re-sent once (the backend upserts).
+EXPORT_VERSION = "v2"
 
 
 @dataclass(frozen=True)
@@ -51,6 +62,7 @@ TABLES = (
             SELECT d.id, (d.end_date IS NOT NULL OR d.start_date < {_STALE}) AS closed,
                    to_jsonb(d) || jsonb_build_object(
                      'start_address', sa.display_name, 'end_address', ea.display_name,
+                     'start_address_details', {_address('sa')}, 'end_address_details', {_address('ea')},
                      'start_geofence', sg.name, 'end_geofence', eg.name) AS row
               FROM drives d
               LEFT JOIN addresses sa ON sa.id = d.start_address_id
@@ -75,7 +87,8 @@ TABLES = (
         record_type="charging_process",
         sql=f"""
             SELECT c.id, (c.end_date IS NOT NULL OR c.start_date < {_STALE}) AS closed,
-                   to_jsonb(c) || jsonb_build_object('address', a.display_name, 'geofence', g.name) AS row
+                   to_jsonb(c) || jsonb_build_object(
+                     'address', a.display_name, 'address_details', {_address('a')}, 'geofence', g.name) AS row
               FROM charging_processes c
               LEFT JOIN addresses a ON a.id = c.address_id
               LEFT JOIN geofences g ON g.id = c.geofence_id
@@ -178,7 +191,7 @@ class TeslaMateSource:
         return [car_id for car_id, _, _ in rows]
 
     def _page(self, conn, outbox: Outbox, table: _Table) -> tuple[int, bool]:
-        cursor_name = f"{SOURCE}.{table.kind}"
+        cursor_name = f"{SOURCE}.{EXPORT_VERSION}.{table.kind}"
         cursor = int(outbox.get_cursor(cursor_name, "0"))
         params = {"cursor": cursor, "limit": PAGE_SIZE}
         if ":stale" in table.sql:
@@ -232,6 +245,10 @@ class TeslaMateSource:
             )
             if not position and not state:
                 continue
+            drive_open = conn.run("SELECT 1 FROM drives WHERE car_id = :car AND end_date IS NULL"
+                                  f" AND start_date > {_STALE} LIMIT 1", car=car_id, stale=self._stale)
+            charge_open = conn.run("SELECT 1 FROM charging_processes WHERE car_id = :car AND end_date IS NULL"
+                                   f" AND start_date > {_STALE} LIMIT 1", car=car_id, stale=self._stale)
             position_id = position[0][0] if position else 0
             records.append({
                 "type": "vehicle_status",
@@ -241,6 +258,8 @@ class TeslaMateSource:
                 "data": {
                     "position": _json(position[0][1]) if position else None,
                     "state": _json(state[0][0]) if state else None,
+                    "drive_open": bool(drive_open),
+                    "charge_open": bool(charge_open),
                 },
             })
         # Content-addressed keys mean an unchanged snapshot is never re-sent.

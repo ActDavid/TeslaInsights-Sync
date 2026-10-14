@@ -168,12 +168,17 @@ class SenderTests(unittest.TestCase):
 class FakeConn:
     """Answers TeslaMate queries from in-memory rows."""
 
-    def __init__(self, drives, positions=None):
+    def __init__(self, drives, positions=None, charging=False):
+        self.charging = charging
         self.drives = drives  # list of (id, closed)
         self.positions = positions or {}
         self.closed = False
 
     def run(self, sql, **params):
+        if sql.startswith("SELECT 1 FROM charging_processes"):
+            return [[1]] if self.charging else []
+        if sql.startswith("SELECT 1 FROM drives"):
+            return []
         if "FROM cars" in sql:
             return [[1, "5YJ3E1EA7KF000000", {"id": 1, "name": "Model Y"}]]
         if "FROM drives" in sql:
@@ -204,7 +209,7 @@ class TeslaMateTests(unittest.TestCase):
         box = make_outbox()
         self.source(conn).collect(box)
         self.assertTrue(conn.closed)
-        self.assertEqual(box.get_cursor("teslamate.drives"), "2")
+        self.assertEqual(box.get_cursor("teslamate.v2.drives"), "2")
         recs = [r for b in self.bodies(box, "drives") for r in b["records"]]
         self.assertEqual([(r["type"], r["source_id"]) for r in recs],
                          [("drive", "1"), ("drive_position", "10"), ("drive_position", "11"), ("drive", "2"), ("drive_position", "12")])
@@ -226,11 +231,45 @@ class TeslaMateTests(unittest.TestCase):
         src.collect(box)
         self.assertEqual(box.pending_count(), before)
 
+    def test_status_reports_open_charge_and_sql_has_address_details(self):
+        from teslainsights_sync.sources import teslamate
+        box = make_outbox()
+        self.source(FakeConn([], charging=True)).collect(box)
+        status = self.bodies(box, "status")[0]["records"][0]["data"]
+        self.assertEqual((status["drive_open"], status["charge_open"]), (False, True))
+        self.assertIn("'start_address_details'", teslamate.TABLES[0].sql)
+        self.assertIn("to_jsonb(sa)->>'city'", teslamate.TABLES[0].sql)
+        self.assertIn("'address_details'", teslamate.TABLES[1].sql)
+
     def test_reports_more_when_page_full(self):
         conn = FakeConn([(i, True) for i in range(1, 60)])
         box = make_outbox()
         self.assertFalse(self.source(conn).collect(box))  # 59 rows fit in the record budget
-        self.assertEqual(box.get_cursor("teslamate.drives"), "59")
+        self.assertEqual(box.get_cursor("teslamate.v2.drives"), "59")
+
+
+class HomeAssistantBackfillTests(unittest.TestCase):
+    def test_longer_backfill_walks_further_back(self):
+        now = datetime(2026, 10, 14, 12, tzinfo=timezone.utc)
+        box = make_outbox()
+        # An install from 0.2.0: caught up, 10 days of history.
+        box.set_cursors({"homeassistant.history_until": (now - timedelta(minutes=2)).isoformat()})
+        windows = []
+
+        def get_json(path):
+            if path.startswith("/history/"):
+                windows.append(path)
+                return []
+            return {"attributes": {}}
+
+        src = HomeAssistantSource(("sensor.x",), "t", backfill_days=30, get_json=get_json, now=lambda: now)
+        rounds = 0
+        while src.collect(box) and rounds < 40:
+            rounds += 1
+        start = datetime.fromisoformat(box.get_cursor("homeassistant.history_from"))
+        self.assertLessEqual(start, now - timedelta(days=30))
+        self.assertGreater(start, now - timedelta(days=31))
+        self.assertEqual(rounds, 21)  # one day per cycle from day 10 to day 30, plus the 2-minute settle margin
 
 
 class TibberTests(unittest.TestCase):

@@ -35,7 +35,7 @@ class Config:
     stale_open_hours: int = 48
     tibber_token: str = ""
     ha_entities: tuple[str, ...] = field(default_factory=tuple)
-    ha_backfill_days: int = 10
+    ha_backfill_days: int = 30
     log_level: str = "info"
     data_dir: Path = DATA_DIR
 
@@ -80,7 +80,7 @@ def parse(options: dict, data_dir: Path = DATA_DIR) -> Config:
         stale_open_hours=int(options.get("stale_open_hours", 48)),
         tibber_token=str(options.get("tibber_token", "") or ""),
         ha_entities=entities,
-        ha_backfill_days=int(options.get("ha_backfill_days", 10)),
+        ha_backfill_days=int(options.get("ha_backfill_days", 30)),
         log_level=str(options.get("log_level", "info")),
         data_dir=data_dir,
     )
